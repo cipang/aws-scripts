@@ -1,9 +1,7 @@
-#!/usr/bin/python
-
 ######
 #
-# AWS auto snapshot script - 2016-03-31
-# https://github.com/viyh/aws-scripts
+# AWS auto snapshot script - 2017-04-30
+# Forked from https://github.com/viyh/aws-scripts
 #
 # Snapshot all EC2 volumes and delete snapshots older than retention time
 #
@@ -15,49 +13,70 @@
 #   ec2:DescribeSnapshots
 #   ec2:CreateTags
 #
+# Also need to setup the AWS region and credential files:
+#   ~/.aws/credentials
+#   ~/.aws/config
+#
+# More: https://boto3.readthedocs.io/en/latest/guide/quickstart.html#configuration
+#
 
 import boto3
-import datetime
+import subprocess as sp
+import syslog
 from datetime import tzinfo, timedelta, datetime
+
+syslog.openlog("autosnap")
 
 # number of days to retain snapshots for
 retention_days = 7
 
 # create snapshot for volume
 def create_volume_snapshot(instance_name, volume):
-    description = 'autosnap-%s.%s-%s' % ( instance_name, volume.volume_id,
-        datetime.now().strftime("%Y%m%d-%H%M%S") )
+    description = "autosnap_{}.{}_{}".format(instance_name, volume.volume_id, datetime.now().strftime("%Y%m%d%H%M%S"))
     snapshot = volume.create_snapshot(Description=description)
     if snapshot:
         snapshot.create_tags(Tags=[{'Key': 'Name', 'Value': description}])
-        print("\t\tSnapshot created with description [%s]" % description)
+        syslog.syslog("Created snapshot {} for {}.{}.".format(snapshot.id, instance_name, volume.volume_id))
+
 
 # find and delete snapshots older than retention_days
 def prune_volume_snapshots(retention_days, volume):
     for s in volume.snapshots.all():
+        snapshot_id, snapshot_start_time = s.id, s.start_time
         now = datetime.now(s.start_time.tzinfo)
-        old_snapshot = ( now - s.start_time ) > timedelta(days=retention_days)
-        if not old_snapshot or not s.description.startswith('autosnap-'): continue
-        print("\t\tDeleting snapshot [%s - %s] created [%s]" % ( s.snapshot_id, s.description, str( s.start_time )))
-        s.delete()
+        is_old_snapshot = (now - s.start_time) > timedelta(days=retention_days)
+        if is_old_snapshot and s.description.startswith('autosnap_'): 
+            s.delete()
+            syslog.syslog("Deleted snapshot {} created at {}.".format(snapshot_id, str(snapshot_start_time)))
+
 
 def snapshot_volumes(instance_name, retention_days, volumes):
     for v in volumes:
-        print("\t%s" % v.volume_id)
         create_volume_snapshot(instance_name, v)
         prune_volume_snapshots(retention_days, v)
 
+
+def get_current_instance(ec2):
+    instance_id = sp.check_output(["curl", "-s", "http://169.254.169.254/latest/meta-data/instance-id"]).decode("utf-8")
+    instances = list(ec2.instances.filter(Filters=[{"Name": "instance-id", "Values": [instance_id]}]))
+    if not instances:
+        raise Exception("Instance not found for ID: {}.".format(instance_id))
+    else:
+        return instances
+
 #####
 #####
 #####
 
-print("AWS snapshot backups stated at %s...\n" % datetime.now())
-
-ec2 = boto3.resource('ec2')
-instances = ec2.instances.filter(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
-for i in instances:
-    instance_name = filter(lambda tag: tag['Key'] == 'Name', i.tags)[0]['Value']
-    print("%s - %s" % (instance_name, i.id))
-    volumes = ec2.volumes.filter(Filters=[{'Name': 'attachment.instance-id', 'Values': [i.id]}])
-    snapshot_volumes(instance_name, retention_days, volumes)
-print("\n\nAWS snapshot backups completed at %s\n" % datetime.now())
+syslog.syslog("AWS auto snapshot script started.")
+try:
+    ec2 = boto3.resource('ec2')
+    instances = get_current_instance(ec2)
+    for i in instances:
+        tags = {tag["Key"]: tag["Value"] for tag in i.tags}
+        instance_name = tags.get("Name", i.id)
+        volumes = ec2.volumes.filter(Filters=[{'Name': 'attachment.instance-id', 'Values': [i.id]}])
+        snapshot_volumes(instance_name, retention_days, volumes)
+    syslog.syslog("AWS auto snapshot script completed.")
+except Exception as e:
+    syslog.syslog(syslog.LOG_ERR, str(e))
