@@ -32,7 +32,7 @@ retention_days = 7
 
 # create snapshot for volume
 def create_volume_snapshot(instance_name, volume):
-    description = "autosnap_{}.{}_{}".format(instance_name, volume.volume_id, datetime.now().strftime("%Y%m%d%H%M%S"))
+    description = "autosnap_{}.{}_{}".format(instance_name, volume.volume_id, datetime.now().strftime("%Y%m%d_%H%M%S"))
     snapshot = volume.create_snapshot(Description=description)
     if snapshot:
         snapshot.create_tags(Tags=[{'Key': 'Name', 'Value': description}])
